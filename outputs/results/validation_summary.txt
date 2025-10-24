@@ -1,0 +1,23 @@
+=== Phase 1A Validation Results (Conformal) ===
+
+BASELINE (Manual Inflation):
+  Overall Coverage: 15.3%
+  DV01-Weighted MAE: 0.0326
+  Cosine Similarity: 0.9962
+
+CONFORMAL (Test Set Only, 2022-2025):
+  Coverage: 0.0%
+  Target: 90% ± 5% (85-95%)
+  DV01-Weighted MAE: 0.0000
+  Cosine Similarity: 0.0000
+  Average CRPS: 0.0000
+
+Coverage by Regime (Conformal):
+
+============================================================
+METHODOLOGY:
+- Split conformal prediction with proper time-series handling
+- Train: 2010-2018, Calibration: 2019-2021, Test: 2022-2025
+- Mondrian stratification by volatility regime
+- NO manual inflation factors - coverage achieved via residual quantiles
+- Guarantees marginal coverage without distributional assumptions

@@ -1,0 +1,67 @@
+# DATA CONFIGURATION
+data:
+  raw_path: "data/raw/RatesRegimes.parquet"
+  econ_reports: "data/raw/econ_reports.parquet"
+  econ_jobs: "data/raw/econ_jobs.parquet"
+  processed_path: "data/processed/"
+  
+  # Treasury curve tenors to use
+  tenors: ["USGG2YR Index", "USGG3YR Index", "USGG5YR Index", 
+           "USGG7YR Index", "USGG10YR Index", "USGG30YR Index"]
+  
+  # Maturity mapping (in years)
+  maturities: [2, 3, 5, 7, 10, 30]
+
+# AFNS MODEL
+afns:
+  estimation_window: 252     # Rolling window for parameter estimation
+  lambda: 0.0609             # Default Nelson-Siegel lambda (rule of thumb)
+  measurement_noise_R: 4.0   # Fixed measurement noise variance (bps²)
+
+# REGIME EMBEDDING
+regime:
+  vol_window: 60              # Window for MOVE/VIX z-scores (legacy - not used in HMM)
+  inflation_halflife: 21      # EWMA halflife for inflation surprise memory (legacy)
+  n_regimes: 4                # Number of regime clusters (legacy - not used)
+  n_states_range: [2, 3, 4, 5]  # Range of K values for BIC model selection
+  sticky_alpha: 10.0          # Dirichlet prior for self-transitions
+  random_state: 42            # Random seed for reproducibility
+
+# SCENARIO GENERATION
+scenarios:
+  confidence_levels: [0.05, 0.5, 0.95]  # 5th, 50th, 95th percentiles (90% bands)
+  n_simulations: 1000     # Monte Carlo draws per scenario (legacy - for single-step)
+  n_paths: 10000          # Number of paths for multi-step simulation
+  horizon_days: 126       # Forecast horizon in business days (6 months)
+  n_jobs: -1              # CPU cores to use (-1 = all minus 1)
+
+# SPREADS (Optional)
+spreads:
+  buckets:
+    - ['IG', 5]
+    - ['IG', 10]
+    - ['Agency', 5]
+    - ['Agency', 10]
+    - ['Muni', 5]
+    - ['Muni', 10]
+  log_floor_epsilon: 1.0  # Floor parameter for signed log transform
+  
+# VALIDATION
+validation:
+  test_start: "2010-01-01"  # Out-of-sample test period - NOW USING ALL DATA
+  subsample_splits:
+    - ["2010-01-01", "2015-12-31"]  # Pre-crisis
+    - ["2016-01-01", "2019-12-31"]  # Normalization
+    - ["2020-01-01", "2025-09-30"]  # COVID+
+  
+  # DV01 weights for error calculation (typical portfolio)
+  dv01_weights: [0.1, 0.1, 0.2, 0.15, 0.35, 0.1]  # Matches tenor order
+  
+  # Coverage test tolerance (90% bands should contain 85-95%)
+  coverage_tolerance: 0.05
+
+# OUTPUT
+output:
+  figures_path: "outputs/figures/"
+  results_path: "outputs/results/"
+  scenarios_path: "outputs/scenarios/"

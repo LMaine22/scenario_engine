@@ -1,0 +1,231 @@
+============================================================
+PHASE 1A: Treasury Scenario Engine - MVP
+============================================================
+Overall Progress:   0%|          | 0/7 [00:00<?, ?it/s][1/7] Loading configuration:   0%|          | 0/7 [00:00<?, ?it/s][2/7] Preparing data:  14%|█▍        | 1/7 [00:00<00:00, 198.34it/s][2/7] Preparing data:  29%|██▊       | 2/7 [00:00<00:00, 13.24it/s] [3/7] Fitting AFNS model:  29%|██▊       | 2/7 [00:00<00:00, 13.24it/s][4/7] Fitting regime classification:  43%|████▎     | 3/7 [00:00<00:00, 13.24it/s][4/7] Fitting regime classification:  57%|█████▋    | 4/7 [00:01<00:00,  3.23it/s][5/7] Generating scenarios:  57%|█████▋    | 4/7 [00:01<00:00,  3.23it/s]         [6/7] Running validation (this takes time):  71%|███████▏  | 5/7 [00:01<00:00,  3.23it/s]Processed data: 4049 observations
+Date range: 2010-03-25 00:00:00 to 2025-09-30 00:00:00
+
+=== AFNS Model Fit ===
+Observations: 4049
+
+Factor Summary:
+             Level        Slope    Curvature
+count  4049.000000  4049.000000  4049.000000
+mean      1.221572    -0.009701     6.635215
+std       3.785614     2.381723     9.094443
+min      -6.636286    -4.856645   -13.021829
+25%      -1.671821    -1.970284     0.180602
+50%       1.153590    -0.333728     5.976098
+75%       3.968487     1.668081    12.335892
+max       9.911453     6.613705    28.131717
+
+Factor Covariance Matrix:
+              Level     Slope  Curvature
+Level      0.037366 -0.035459  -0.086071
+Slope     -0.035459  0.036638   0.081971
+Curvature -0.086071  0.081971   0.218743
+
+R² by tenor:
+  USGG2YR Index: 0.9982
+  USGG3YR Index: 0.9991
+  USGG5YR Index: 0.9964
+  USGG7YR Index: 0.9981
+  USGG10YR Index: 0.9950
+  USGG30YR Index: 1.0000
+
+=== Regime Classification ===
+Number of regimes: 4
+
+Regime 0:
+  Observations: 1585 (39.1%)
+  Characteristics:
+    MOVE (z): -0.69
+    VIX (z): -0.57
+    OIS slope: 0.31
+    Fed vs OIS: -0.12
+    Inflation mem: 0.00
+
+Regime 1:
+  Observations: 508 (12.5%)
+  Characteristics:
+    MOVE (z): -0.17
+    VIX (z): -0.37
+    OIS slope: -0.98
+    Fed vs OIS: 0.23
+    Inflation mem: 0.00
+
+Regime 2:
+  Observations: 1374 (33.9%)
+  Characteristics:
+    MOVE (z): 0.21
+    VIX (z): 0.03
+    OIS slope: 0.99
+    Fed vs OIS: -0.06
+    Inflation mem: 0.00
+
+Regime 3:
+  Observations: 582 (14.4%)
+  Characteristics:
+    MOVE (z): 1.17
+    VIX (z): 1.42
+    OIS slope: -0.07
+    Fed vs OIS: -0.54
+    Inflation mem: 0.00
+
+=== Scenario Analysis (as of 2025-09-30) ===
+Current Regime: 0
+Current 10yr yield: 4.14%
+
+Scenario Summary (10yr yield):
+  Fed -100bp: 3.37% [3.29% - 3.45%]
+  Fed  -50bp: 3.73% [3.66% - 3.81%]
+  Fed   +0bp: 4.10% [4.02% - 4.17%]
+  Fed  +50bp: 4.46% [4.38% - 4.53%]
+  Fed +100bp: 4.82% [4.74% - 4.89%]
+
+=== Running Validation ===
+Running historical backtest...
+
+Backtesting:   0%|          | 0/4048 [00:00<?, ?it/s][A
+Backtesting:   2%|▏         | 61/4048 [00:00<00:06, 604.72it/s][A
+Backtesting:   4%|▎         | 143/4048 [00:00<00:05, 729.16it/s][A
+Backtesting:   5%|▌         | 217/4048 [00:00<00:05, 731.57it/s][A
+Backtesting:   7%|▋         | 296/4048 [00:00<00:04, 753.24it/s][A
+Backtesting:   9%|▉         | 379/4048 [00:00<00:04, 773.38it/s][A
+Backtesting:  11%|█▏        | 465/4048 [00:00<00:04, 800.78it/s][A
+Backtesting:  14%|█▎        | 548/4048 [00:00<00:04, 809.69it/s][A
+Backtesting:  16%|█▌        | 631/4048 [00:00<00:04, 814.42it/s][A
+Backtesting:  18%|█▊        | 713/4048 [00:00<00:04, 805.86it/s][A
+Backtesting:  20%|█▉        | 794/4048 [00:01<00:04, 775.69it/s][A
+Backtesting:  22%|██▏       | 872/4048 [00:01<00:04, 755.96it/s][A
+Backtesting:  23%|██▎       | 948/4048 [00:01<00:04, 724.88it/s][A
+Backtesting:  25%|██▌       | 1021/4048 [00:01<00:05, 576.06it/s][A
+Backtesting:  27%|██▋       | 1105/4048 [00:01<00:04, 640.20it/s][A
+Backtesting:  29%|██▉       | 1180/4048 [00:01<00:04, 668.25it/s][A
+Backtesting:  31%|███       | 1256/4048 [00:01<00:04, 690.71it/s][A
+Backtesting:  33%|███▎      | 1331/4048 [00:01<00:03, 706.48it/s][A
+Backtesting:  35%|███▍      | 1404/4048 [00:01<00:03, 688.91it/s][A
+Backtesting:  37%|███▋      | 1488/4048 [00:02<00:03, 730.80it/s][A
+Backtesting:  39%|███▊      | 1563/4048 [00:02<00:03, 733.10it/s][A
+Backtesting:  41%|████      | 1640/4048 [00:02<00:03, 743.67it/s][A
+Backtesting:  43%|████▎     | 1725/4048 [00:02<00:02, 774.72it/s][A
+Backtesting:  45%|████▍     | 1809/4048 [00:02<00:02, 792.79it/s][A
+Backtesting:  47%|████▋     | 1889/4048 [00:02<00:02, 785.38it/s][A
+Backtesting:  49%|████▊     | 1968/4048 [00:02<00:02, 781.80it/s][A
+Backtesting:  51%|█████     | 2048/4048 [00:02<00:02, 784.99it/s][A
+Backtesting:  53%|█████▎    | 2127/4048 [00:02<00:02, 768.41it/s][A
+Backtesting:  54%|█████▍    | 2205/4048 [00:02<00:02, 756.35it/s][A
+Backtesting:  56%|█████▋    | 2281/4048 [00:03<00:02, 756.60it/s][A
+Backtesting:  58%|█████▊    | 2357/4048 [00:03<00:02, 726.91it/s][A
+Backtesting:  60%|██████    | 2430/4048 [00:03<00:02, 725.23it/s][A
+Backtesting:  62%|██████▏   | 2512/4048 [00:03<00:02, 752.52it/s][A
+Backtesting:  64%|██████▍   | 2591/4048 [00:03<00:01, 762.75it/s][A
+Backtesting:  66%|██████▌   | 2669/4048 [00:03<00:01, 765.91it/s][A
+Backtesting:  68%|██████▊   | 2749/4048 [00:03<00:01, 775.58it/s][A
+Backtesting:  70%|██████▉   | 2827/4048 [00:03<00:01, 769.78it/s][A
+Backtesting:  72%|███████▏  | 2905/4048 [00:03<00:01, 736.82it/s][A
+Backtesting:  74%|███████▎  | 2980/4048 [00:04<00:01, 738.28it/s][A
+Backtesting:  76%|███████▌  | 3064/4048 [00:04<00:01, 765.96it/s][A
+Backtesting:  78%|███████▊  | 3141/4048 [00:04<00:01, 528.98it/s][A
+Backtesting:  79%|███████▉  | 3204/4048 [00:04<00:01, 507.90it/s][A
+Backtesting:  81%|████████  | 3265/4048 [00:04<00:01, 530.10it/s][A
+Backtesting:  83%|████████▎ | 3351/4048 [00:04<00:01, 609.71it/s][A
+Backtesting:  84%|████████▍ | 3418/4048 [00:04<00:01, 624.42it/s][A
+Backtesting:  87%|████████▋ | 3503/4048 [00:04<00:00, 685.15it/s][A
+Backtesting:  89%|████████▉ | 3593/4048 [00:05<00:00, 744.40it/s][A
+Backtesting:  91%|█████████ | 3674/4048 [00:05<00:00, 762.09it/s][A
+Backtesting:  93%|█████████▎| 3753/4048 [00:05<00:00, 765.62it/s][A
+Backtesting:  95%|█████████▍| 3832/4048 [00:05<00:00, 769.84it/s][A
+Backtesting:  97%|█████████▋| 3917/4048 [00:05<00:00, 793.03it/s][A
+Backtesting:  99%|█████████▉| 4002/4048 [00:05<00:00, 809.59it/s][A
+                                                                 [AComputing coverage rates...
+Computing DV01-weighted errors...
+Computing shape accuracy...
+Testing sub-sample stability...
+
+Sub-sample tests:   0%|          | 0/3 [00:00<?, ?it/s][A
+Backtesting:   0%|          | 0/1505 [00:00<?, ?it/s][A
+Backtesting:   6%|▌         | 83/1505 [00:00<00:01, 826.88it/s][A
+Backtesting:  11%|█▏        | 171/1505 [00:00<00:01, 854.65it/s][A
+Backtesting:  17%|█▋        | 257/1505 [00:00<00:01, 847.73it/s][A
+Backtesting:  23%|██▎       | 347/1505 [00:00<00:01, 865.78it/s][A
+Backtesting:  29%|██▉       | 434/1505 [00:00<00:01, 859.31it/s][A
+Backtesting:  35%|███▍      | 524/1505 [00:00<00:01, 867.39it/s][A
+Backtesting:  41%|████      | 611/1505 [00:00<00:01, 848.80it/s][A
+Backtesting:  47%|████▋     | 701/1505 [00:00<00:00, 864.29it/s][A
+Backtesting:  52%|█████▏    | 788/1505 [00:00<00:00, 860.14it/s][A
+Backtesting:  58%|█████▊    | 875/1505 [00:01<00:00, 819.31it/s][A
+Backtesting:  64%|██████▍   | 966/1505 [00:01<00:00, 844.77it/s][A
+Backtesting:  70%|███████   | 1056/1505 [00:01<00:00, 859.46it/s][A
+Backtesting:  76%|███████▌  | 1143/1505 [00:01<00:00, 861.64it/s][A
+Backtesting:  82%|████████▏ | 1235/1505 [00:01<00:00, 877.44it/s][A
+Backtesting:  88%|████████▊ | 1323/1505 [00:01<00:00, 864.23it/s][A
+Backtesting:  94%|█████████▍| 1413/1505 [00:01<00:00, 873.65it/s][A
+Backtesting: 100%|█████████▉| 1501/1505 [00:01<00:00, 857.37it/s][A
+                                                                 [A
+Sub-sample tests:  33%|███▎      | 1/3 [00:03<00:06,  3.07s/it][A
+Backtesting:   0%|          | 0/1042 [00:00<?, ?it/s][A
+Backtesting:   8%|▊         | 84/1042 [00:00<00:01, 839.93it/s][A
+Backtesting:  16%|█▌        | 168/1042 [00:00<00:01, 818.65it/s][A
+Backtesting:  24%|██▍       | 250/1042 [00:00<00:00, 818.26it/s][A
+Backtesting:  32%|███▏      | 332/1042 [00:00<00:00, 797.70it/s][A
+Backtesting:  40%|███▉      | 412/1042 [00:00<00:00, 795.39it/s][A
+Backtesting:  47%|████▋     | 492/1042 [00:00<00:00, 787.86it/s][A
+Backtesting:  55%|█████▍    | 571/1042 [00:00<00:00, 653.60it/s][A
+Backtesting:  63%|██████▎   | 654/1042 [00:00<00:00, 700.32it/s][A
+Backtesting:  71%|███████▏  | 743/1042 [00:00<00:00, 752.88it/s][A
+Backtesting:  80%|███████▉  | 833/1042 [00:01<00:00, 793.08it/s][A
+Backtesting:  88%|████████▊ | 917/1042 [00:01<00:00, 804.59it/s][A
+Backtesting:  96%|█████████▌| 999/1042 [00:01<00:00, 804.60it/s][A
+                                                                [A
+Sub-sample tests:  67%|██████▋   | 2/3 [00:05<00:02,  2.66s/it][A
+Backtesting:   0%|          | 0/1499 [00:00<?, ?it/s][A
+Backtesting:   5%|▌         | 82/1499 [00:00<00:01, 815.44it/s][A
+Backtesting:  11%|█▏        | 172/1499 [00:00<00:01, 864.99it/s][A
+Backtesting:  18%|█▊        | 263/1499 [00:00<00:01, 882.79it/s][A
+Backtesting:  23%|██▎       | 352/1499 [00:00<00:01, 872.98it/s][A
+Backtesting:  29%|██▉       | 440/1499 [00:00<00:01, 846.16it/s][A
+Backtesting:  35%|███▌      | 530/1499 [00:00<00:01, 862.89it/s][A
+Backtesting:  42%|████▏     | 623/1499 [00:00<00:00, 882.17it/s][A
+Backtesting:  47%|████▋     | 712/1499 [00:00<00:00, 882.01it/s][A
+Backtesting:  53%|█████▎    | 801/1499 [00:00<00:00, 840.04it/s][A
+Backtesting:  59%|█████▉    | 886/1499 [00:01<00:00, 838.73it/s][A
+Backtesting:  65%|██████▌   | 975/1499 [00:01<00:00, 851.81it/s][A
+Backtesting:  71%|███████   | 1061/1499 [00:01<00:00, 848.02it/s][A
+Backtesting:  77%|███████▋  | 1150/1499 [00:01<00:00, 859.41it/s][A
+Backtesting:  83%|████████▎ | 1239/1499 [00:01<00:00, 866.93it/s][A
+Backtesting:  88%|████████▊ | 1326/1499 [00:01<00:00, 867.37it/s][A
+Backtesting:  94%|█████████▍| 1416/1499 [00:01<00:00, 871.81it/s][A
+                                                                 [A
+Sub-sample tests: 100%|██████████| 3/3 [00:08<00:00,  2.85s/it][A
+                                                               [A[6/7] Running validation (this takes time):  86%|████████▌ | 6/7 [00:18<00:04,  4.23s/it][7/7] Generating outputs:  86%|████████▌ | 6/7 [00:18<00:04,  4.23s/it]                  [7/7] Generating outputs:  86%|████████▌ | 6/7 [00:19<00:03,  3.19s/it]
+
+=== Validation Results ===
+Overall Coverage: 78.7%
+Target: 90% (tolerance: 0.05)
+
+DV01-Weighted MAE: 0.0105
+Unweighted MAE: 0.0583
+
+Cosine Similarity (Shape): 0.9995
+
+Sub-sample Stability:
+  2010-01-01 to 2015-12-31:
+    Coverage: 67.6%
+    DV01 MAE: 0.0125
+    Cosine Sim: 0.9993
+  2016-01-01 to 2019-12-31:
+    Coverage: 87.2%
+    DV01 MAE: 0.0071
+    Cosine Sim: 0.9998
+  2020-01-01 to 2025-09-30:
+    Coverage: 84.4%
+    DV01 MAE: 0.0108
+    Cosine Sim: 0.9996
+Traceback (most recent call last):
+  File "/Users/lutherhart/Library/Mobile Documents/com~apple~CloudDocs/scenario_engine/main.py", line 215, in <module>
+    main()
+  File "/Users/lutherhart/Library/Mobile Documents/com~apple~CloudDocs/scenario_engine/main.py", line 194, in main
+    plot_scenario_fan(scenarios, current_state, config,
+  File "/Users/lutherhart/Library/Mobile Documents/com~apple~CloudDocs/scenario_engine/main.py", line 43, in plot_scenario_fan
+    ax.plot([maturity, maturity], [percs['p10'], percs['p90']], '-', alpha=0.5)
+KeyError: 'p10'
