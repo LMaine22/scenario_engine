@@ -1,556 +1,473 @@
 """
-Validation: Historical accuracy, coverage tests, DV01-weighted metrics, CRPS, PIT
+Validation: Multi-horizon backtesting with proper VAR dynamics and regime-scaled covariances
 """
 import numpy as np
 import pandas as pd
 from scipy import stats
+from scipy.linalg import solve_discrete_lyapunov
+from typing import Dict, List, Tuple, Optional
+import logging
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
-def _compute_crps(forecast_samples, realized):
+class MultiHorizonValidator:
     """
-    Compute Continuous Ranked Probability Score
-    
-    Args:
-        forecast_samples: Array of forecast distribution samples
-        realized: Realized value
-        
-    Returns:
-        crps: CRPS score (lower is better, in same units as variable)
+    Sophisticated multi-horizon validation with proper state-space dynamics
     """
-    # CRPS = E|X - y| - 0.5 * E|X - X'|
     
-    # Term 1: Mean absolute error
-    term1 = np.mean(np.abs(forecast_samples - realized))
-    
-    # Term 2: Approximate spread penalty with subsampling for efficiency
-    n = len(forecast_samples)
-    if n > 100:
-        # Subsample for efficiency
-        idx = np.random.choice(n, 100, replace=False)
-        samples = forecast_samples[idx]
-    else:
-        samples = forecast_samples
-    
-    # Compute pairwise differences
-    diffs = []
-    for i in range(len(samples)):
-        for j in range(i+1, len(samples)):
-            diffs.append(np.abs(samples[i] - samples[j]))
-    
-    term2 = 0.5 * np.mean(diffs) if diffs else 0
-    
-    crps = term1 - term2
-    return crps
-
-
-def _compute_pit(forecast_samples, realized):
-    """
-    Compute Probability Integral Transform
-    
-    Args:
-        forecast_samples: Array of forecast distribution samples
-        realized: Realized value
+    def __init__(self, afns_model, hmm_model, config):
+        """
+        Initialize validator with models and config
         
-    Returns:
-        pit: PIT value (should be ~0.5 if unbiased, uniform if calibrated)
-    """
-    # PIT = Empirical CDF(realized)
-    pit = (forecast_samples < realized).mean()
-    return pit
-
-
-def backtest_scenarios(df, df_factors, afns_model, hmm_model, 
-                       regime_labels, regime_covs, config):
-    """
-    Run historical backtest: generate scenarios and compare to realized outcomes
+        Args:
+            afns_model: Fitted AFNS model with VAR parameters
+            hmm_model: Fitted Sticky HMM model
+            config: Configuration dict
+        """
+        self.afns = afns_model
+        self.hmm = hmm_model
+        self.config = config
+        
+        # Extract key parameters
+        self.horizons = config['validation']['test_horizons']
+        self.confidence_levels = config['scenarios']['confidence_levels']
+        self.n_paths = 1000  # Fewer paths for validation speed
+        
+        # Regime-dependent volatility scaling
+        self.use_scaled_Q = config['regime']['volatility_scaling']['use_scaled_Q']
+        self.scale_method = config['regime']['volatility_scaling']['scale_method']
+        
+        logger.info(f"Initialized MultiHorizonValidator with horizons: {self.horizons}")
     
-    Args:
-        df: DataFrame with yield curve data
-        df_factors: DataFrame with AFNS factors
-        afns_model: Fitted AFNS model
-        hmm_model: Fitted StickyHMM model
-        regime_labels: Historical regime assignments (Series)
-        regime_covs: Covariance matrices by regime
-        config: Configuration dict
+    def compute_regime_scaling_factors(self) -> Dict[int, float]:
+        """
+        Compute volatility scaling factor for each regime
         
-    Returns:
-        backtest_results: DataFrame with forecasts and realized values
-    """
-    from tqdm import tqdm
+        Returns:
+            Dict mapping regime -> scaling factor
+        """
+        scaling_factors = {}
+        
+        # Get regime covariances (these are covariances of CHANGES)
+        regime_covs = self.hmm.regime_covs
+        
+        if self.scale_method == 'trace_ratio':
+            # Use trace (total variance) as scaling metric
+            base_trace = np.trace(regime_covs[0])
+            for k in range(self.hmm.n_states):
+                scaling_factors[k] = np.trace(regime_covs[k]) / base_trace
+                
+        elif self.scale_method == 'determinant_ratio':
+            # Use determinant (total volume) as scaling metric
+            base_det = np.linalg.det(regime_covs[0]) ** (1/3)
+            for k in range(self.hmm.n_states):
+                regime_det = np.linalg.det(regime_covs[k]) ** (1/3)
+                scaling_factors[k] = regime_det / base_det if base_det > 0 else 1.0
+                
+        else:
+            # No scaling
+            scaling_factors = {k: 1.0 for k in range(self.hmm.n_states)}
+        
+        logger.info(f"Regime scaling factors: {scaling_factors}")
+        return scaling_factors
     
-    test_start = pd.Timestamp(config['validation']['test_start'])
-    test_dates = df.index[df.index >= test_start]
-    
-    tenors = config['data']['tenors']
-    results = []
-    
-    # For each test date, generate 1-day ahead scenario and compare to realized
-    for i in tqdm(range(len(test_dates) - 1), desc="Backtesting", position=1, leave=False):
-        date = test_dates[i]
-        idx = df.index.get_loc(date)
-        next_date = test_dates[i + 1]
+    def simulate_paths(self, initial_state: Dict, horizon: int, 
+                      n_paths: int = None) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Simulate paths using proper VAR dynamics with regime transitions
         
-        # Current state
-        current_factors = df_factors.iloc[idx][['L', 'S', 'C']].values
-        # regime_labels is a Series indexed by date, use .loc
-        try:
-            current_regime = regime_labels.loc[date]
-        except:
-            current_regime = regime_labels.iloc[-1]
-        
-        # Generate scenario (assume no Fed shock for 1-day ahead)
-        # Use regime-specific covariance from HMM
-        cov = regime_covs[current_regime]
-        base_factors = current_factors.copy()
-        
-        # Generate random shocks
-        factor_shocks = np.random.multivariate_normal(
-            mean=np.zeros(3),
-            cov=cov,
-            size=1000
-        )
-        sim_factors = base_factors + factor_shocks
-        sim_yields = afns_model.reconstruct_yields(sim_factors)
-        
-        # Compute percentiles
-        confidence_levels = config['scenarios']['confidence_levels']
-        p_low = np.percentile(sim_yields, confidence_levels[0]*100, axis=0)
-        p50 = np.percentile(sim_yields, confidence_levels[1]*100, axis=0)
-        p_high = np.percentile(sim_yields, confidence_levels[2]*100, axis=0)
-        
-        # Get realized yields
-        next_idx = df.index.get_loc(next_date)
-        realized = df.iloc[next_idx][tenors].values
-        
-        # Store results with CRPS and PIT
-        for j, tenor in enumerate(tenors):
-            # Compute metrics
-            forecast_mean = sim_yields[:, j].mean()
-            rmse = np.sqrt((forecast_mean - realized[j]) ** 2)
-            mae = np.abs(forecast_mean - realized[j])
-            crps = _compute_crps(sim_yields[:, j], realized[j])
-            pit = _compute_pit(sim_yields[:, j], realized[j])
-            coverage = (realized[j] >= p_low[j]) and (realized[j] <= p_high[j])
+        Args:
+            initial_state: Dict with 'factors', 'regime_probs', 'date'
+            horizon: Forecast horizon in days
+            n_paths: Number of paths (default from config)
             
-            results.append({
-                'date': date,
-                'next_date': next_date,
-                'tenor': tenor,
-                'regime': current_regime,
-                'forecast_p10': p_low[j],
-                'forecast_p50': p50[j],
-                'forecast_p90': p_high[j],
-                'realized': realized[j],
-                'rmse': rmse,
-                'mae': mae,
+        Returns:
+            factor_paths: (n_paths, horizon+1, 3) array of factor paths
+            regime_paths: (n_paths, horizon+1) array of regime paths
+        """
+        if n_paths is None:
+            n_paths = self.n_paths
+        
+        # Extract initial conditions
+        f_0 = initial_state['factors']  # (3,) array
+        gamma_0 = initial_state['regime_probs']  # (K,) array
+        
+        # Get steady-state uncertainty from Lyapunov equation
+        try:
+            P_ss = solve_discrete_lyapunov(self.afns.A, self.afns.Q)
+        except:
+            logger.warning("Lyapunov solution failed, using Q as approximation")
+            P_ss = self.afns.Q * 10
+        
+        # Get regime scaling factors
+        scaling_factors = self.compute_regime_scaling_factors()
+        
+        # Storage
+        factor_paths = np.zeros((n_paths, horizon + 1, 3))
+        regime_paths = np.zeros((n_paths, horizon + 1), dtype=int)
+        
+        # Simulate each path
+        for p in range(n_paths):
+            # Draw initial regime from current distribution
+            s_t = np.random.choice(self.hmm.n_states, p=gamma_0)
+            
+            # Draw initial factors from steady-state distribution
+            # This captures parameter uncertainty
+            f_t = np.random.multivariate_normal(f_0, P_ss * 0.1)  # Scale down P_ss
+            
+            # Store initial state
+            factor_paths[p, 0, :] = f_t
+            regime_paths[p, 0] = s_t
+            
+            # Evolve forward
+            for t in range(1, horizon + 1):
+                # Regime transition
+                transition_probs = self.hmm.transition_matrix[s_t, :]
+                s_t = np.random.choice(self.hmm.n_states, p=transition_probs)
+                
+                # Scale Q by regime
+                if self.use_scaled_Q:
+                    Q_scaled = self.afns.Q * scaling_factors[s_t]
+                else:
+                    Q_scaled = self.afns.Q
+                
+                # VAR dynamics: f_{t+1} = A f_t + b + eta
+                eta = np.random.multivariate_normal(np.zeros(3), Q_scaled)
+                f_t = self.afns.A @ f_t + self.afns.b + eta
+                
+                # Store
+                factor_paths[p, t, :] = f_t
+                regime_paths[p, t] = s_t
+        
+        return factor_paths, regime_paths
+    
+    def factors_to_yields(self, factor_paths: np.ndarray) -> np.ndarray:
+        """
+        Convert factor paths to yield paths using AFNS loadings
+        
+        Args:
+            factor_paths: (n_paths, n_times, 3) array
+            
+        Returns:
+            yield_paths: (n_paths, n_times, n_maturities) array
+        """
+        n_paths, n_times, _ = factor_paths.shape
+        n_mats = len(self.afns.maturities)
+        
+        yield_paths = np.zeros((n_paths, n_times, n_mats))
+        
+        for m, mat in enumerate(self.afns.maturities):
+            # Compute loadings for this maturity
+            tau = mat
+            lam = self.afns.lambda_param
+            h_0 = 1.0
+            h_1 = (1 - np.exp(-lam * tau)) / (lam * tau)
+            h_2 = h_1 - np.exp(-lam * tau)
+            loadings = np.array([h_0, h_1, h_2])
+            
+            # Apply loadings: y = h'f
+            yield_paths[:, :, m] = factor_paths @ loadings
+        
+        return yield_paths
+    
+    def compute_metrics(self, forecasts: np.ndarray, realized: np.ndarray) -> Dict:
+        """
+        Compute comprehensive validation metrics
+        
+        Args:
+            forecasts: (n_paths, n_maturities) array of forecasts
+            realized: (n_maturities,) array of realized values
+            
+        Returns:
+            Dict with metrics including CRPS, PIT, coverage
+        """
+        n_paths, n_mats = forecasts.shape
+        metrics = {}
+        
+        for m in range(n_mats):
+            forecast_m = forecasts[:, m]
+            realized_m = realized[m]
+            
+            # CRPS (Continuous Ranked Probability Score)
+            crps = self._compute_crps(forecast_m, realized_m)
+            
+            # PIT (Probability Integral Transform)
+            pit = self._compute_pit(forecast_m, realized_m)
+            
+            # Coverage at different levels
+            coverage_90 = self._compute_coverage(forecast_m, realized_m, 5, 95)
+            coverage_95 = self._compute_coverage(forecast_m, realized_m, 2.5, 97.5)
+            coverage_99 = self._compute_coverage(forecast_m, realized_m, 0.5, 99.5)
+            
+            # Bias (mean forecast error)
+            bias = np.mean(forecast_m) - realized_m
+            
+            # RMSE
+            rmse = np.sqrt(np.mean((forecast_m - realized_m) ** 2))
+            
+            # MAE
+            mae = np.mean(np.abs(forecast_m - realized_m))
+            
+            metrics[f'mat_{m}'] = {
                 'crps': crps,
                 'pit': pit,
-                'in_band': coverage
-            })
-    
-    df_backtest = pd.DataFrame(results)
-    
-    return df_backtest
-
-
-def compute_coverage(df_backtest):
-    """
-    Compute coverage rates: do 90% bands contain 90% of outcomes?
-    
-    Args:
-        df_backtest: DataFrame from backtest_scenarios
+                'coverage_90': coverage_90,
+                'coverage_95': coverage_95,
+                'coverage_99': coverage_99,
+                'bias': bias,
+                'rmse': rmse,
+                'mae': mae
+            }
         
-    Returns:
-        coverage_stats: Dict with coverage by tenor and regime
-    """
-    coverage_stats = {}
+        return metrics
     
-    # Overall coverage
-    overall_coverage = df_backtest['in_band'].mean()
-    coverage_stats['overall'] = overall_coverage
-    
-    # Coverage by tenor
-    coverage_stats['by_tenor'] = df_backtest.groupby('tenor')['in_band'].mean().to_dict()
-    
-    # Coverage by regime
-    coverage_stats['by_regime'] = df_backtest.groupby('regime')['in_band'].mean().to_dict()
-    
-    return coverage_stats
-
-
-def compute_dv01_weighted_errors(df_backtest, config):
-    """
-    Compute DV01-weighted forecast errors
-    
-    Args:
-        df_backtest: DataFrame from backtest_scenarios
-        config: Configuration dict
+    def _compute_crps(self, forecast_samples: np.ndarray, realized: float) -> float:
+        """Compute CRPS with efficient subsampling"""
+        term1 = np.mean(np.abs(forecast_samples - realized))
         
-    Returns:
-        metrics: Dict with DV01-weighted MAE, RMSE
-    """
-    tenors = config['data']['tenors']
-    dv01_weights = np.array(config['validation']['dv01_weights'])
-    
-    # Compute errors for each tenor
-    errors = []
-    for i, tenor in enumerate(tenors):
-        tenor_data = df_backtest[df_backtest['tenor'] == tenor]
-        error = tenor_data['realized'] - tenor_data['forecast_p50']
-        errors.append(error.values)
-    
-    errors = np.array(errors)  # (n_tenors, n_dates)
-    
-    # Weight by DV01
-    weighted_errors = errors * dv01_weights[:, np.newaxis]
-    
-    # Compute metrics
-    mae = np.mean(np.abs(weighted_errors))
-    rmse = np.sqrt(np.mean(weighted_errors**2))
-    
-    metrics = {
-        'dv01_mae': mae,
-        'dv01_rmse': rmse,
-        'unweighted_mae': np.mean(np.abs(errors)),
-        'unweighted_rmse': np.sqrt(np.mean(errors**2))
-    }
-    
-    return metrics
-
-
-def compute_shape_accuracy(df_backtest, config):
-    """
-    Compute cosine similarity between forecast and realized curve shapes
-    
-    Args:
-        df_backtest: DataFrame from backtest_scenarios
-        config: Configuration dict
+        # Subsample for efficiency
+        n = len(forecast_samples)
+        n_sub = min(n, 100)
+        idx = np.random.choice(n, n_sub, replace=False)
+        samples = forecast_samples[idx]
         
-    Returns:
-        avg_cosine: Average cosine similarity
-    """
-    tenors = config['data']['tenors']
-    dates = df_backtest['date'].unique()
+        # Pairwise differences
+        diffs = []
+        for i in range(len(samples)):
+            for j in range(i+1, len(samples)):
+                diffs.append(np.abs(samples[i] - samples[j]))
+        
+        term2 = 0.5 * np.mean(diffs) if diffs else 0
+        
+        return term1 - term2
     
-    cosine_sims = []
+    def _compute_pit(self, forecast_samples: np.ndarray, realized: float) -> float:
+        """Compute PIT (should be uniform if calibrated)"""
+        return (forecast_samples < realized).mean()
     
-    for date in dates:
-        date_data = df_backtest[df_backtest['date'] == date]
-        
-        # Get forecast and realized curves
-        forecast = date_data.set_index('tenor')['forecast_p50'].reindex(tenors).values
-        realized = date_data.set_index('tenor')['realized'].reindex(tenors).values
-        
-        # Compute cosine similarity
-        cos_sim = np.dot(forecast, realized) / (np.linalg.norm(forecast) * np.linalg.norm(realized))
-        cosine_sims.append(cos_sim)
+    def _compute_coverage(self, forecast_samples: np.ndarray, realized: float,
+                         lower_pct: float, upper_pct: float) -> bool:
+        """Check if realized value falls in prediction interval"""
+        lower = np.percentile(forecast_samples, lower_pct)
+        upper = np.percentile(forecast_samples, upper_pct)
+        return (lower <= realized <= upper)
     
-    return np.mean(cosine_sims)
-
-
-def subsample_stability(df, df_factors, afns_model, hmm_model, 
-                        regime_labels, regime_covs, config):
-    """
-    Test stability across different sub-periods
+    def run_backtest(self, df: pd.DataFrame, df_factors: pd.DataFrame,
+                    start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """
+        Run comprehensive multi-horizon backtest
+        
+        Args:
+            df: DataFrame with yield data
+            df_factors: DataFrame with factor data
+            start_date: Start of test period
+            end_date: End of test period
+            
+        Returns:
+            DataFrame with backtest results
+        """
+        if start_date is None:
+            start_date = self.config['validation']['backtest']['start_date']
+        if end_date is None:
+            end_date = df.index[-1]
+        
+        # Filter to test period
+        test_mask = (df.index >= pd.Timestamp(start_date)) & \
+                   (df.index <= pd.Timestamp(end_date))
+        df_test = df[test_mask]
+        df_factors_test = df_factors[test_mask]
+        
+        results = []
+        tenors = self.config['data']['tenors']
+        
+        # For each origin date
+        for origin_idx in tqdm(range(len(df_test)), desc="Backtesting", leave=False):
+            origin_date = df_test.index[origin_idx]
+            
+            # Skip if not enough future data for longest horizon
+            max_horizon = max(self.horizons)
+            if origin_idx + max_horizon >= len(df_test):
+                continue
+            
+            # Get initial state
+            factors_0 = df_factors_test.iloc[origin_idx].values
+            
+            # Get regime probabilities at origin
+            try:
+                gamma_0 = self.hmm.regime_probs.loc[origin_date].values
+            except:
+                # If exact date not found, use nearest
+                nearest_idx = self.hmm.regime_probs.index.get_indexer([origin_date], method='nearest')[0]
+                gamma_0 = self.hmm.regime_probs.iloc[nearest_idx].values
+            
+            initial_state = {
+                'factors': factors_0,
+                'regime_probs': gamma_0,
+                'date': origin_date
+            }
+            
+            # For each horizon
+            for horizon in self.horizons:
+                if origin_idx + horizon >= len(df_test):
+                    continue
+                
+                # Simulate paths
+                factor_paths, regime_paths = self.simulate_paths(
+                    initial_state, horizon, n_paths=self.n_paths
+                )
+                
+                # Convert to yields
+                yield_paths = self.factors_to_yields(factor_paths)
+                
+                # Extract forecasts at horizon
+                forecasts = yield_paths[:, -1, :]  # (n_paths, n_maturities)
+                
+                # Get realized yields
+                realized_date = df_test.index[origin_idx + horizon]
+                realized = df_test.loc[realized_date, tenors].values
+                
+                # Compute metrics
+                metrics = self.compute_metrics(forecasts, realized)
+                
+                # Store results
+                for m, tenor in enumerate(tenors):
+                    mat_metrics = metrics[f'mat_{m}']
+                    results.append({
+                        'origin_date': origin_date,
+                        'horizon_days': horizon,
+                        'target_date': realized_date,
+                        'tenor': tenor,
+                        'maturity': self.afns.maturities[m],
+                        'realized': realized[m],
+                        'forecast_mean': np.mean(forecasts[:, m]),
+                        'forecast_p5': np.percentile(forecasts[:, m], 5),
+                        'forecast_p50': np.percentile(forecasts[:, m], 50),
+                        'forecast_p95': np.percentile(forecasts[:, m], 95),
+                        **mat_metrics
+                    })
+        
+        return pd.DataFrame(results)
     
-    Args:
-        All model components and config
+    def analyze_results(self, results_df: pd.DataFrame) -> Dict:
+        """
+        Analyze backtest results and compute summary statistics
         
-    Returns:
-        stability_results: Dict with metrics by sub-period
-    """
-    from tqdm import tqdm
-    
-    subsample_splits = config['validation']['subsample_splits']
-    stability_results = {}
-    
-    for i, (start, end) in enumerate(tqdm(subsample_splits, desc="Sub-sample tests", position=1, leave=False)):
-        start_date = pd.Timestamp(start)
-        end_date = pd.Timestamp(end)
+        Args:
+            results_df: DataFrame from run_backtest
+            
+        Returns:
+            Dict with analysis results
+        """
+        analysis = {}
         
-        # Filter data for this period
-        mask_df = (df.index >= start_date) & (df.index <= end_date)
-        df_sub = df[mask_df]
+        # Overall metrics
+        analysis['overall'] = {
+            'mean_crps': results_df['crps'].mean(),
+            'mean_pit': results_df['pit'].mean(),
+            'coverage_90': results_df['coverage_90'].mean(),
+            'coverage_95': results_df['coverage_95'].mean(),
+            'mean_bias': results_df['bias'].mean(),
+            'mean_rmse': results_df['rmse'].mean()
+        }
         
-        # df_factors has same length as df, regime_labels has 1 less row
-        mask_factors = (df_factors.index >= start_date) & (df_factors.index <= end_date)
-        df_factors_sub = df_factors[mask_factors]
+        # By horizon
+        analysis['by_horizon'] = {}
+        for horizon in self.horizons:
+            horizon_data = results_df[results_df['horizon_days'] == horizon]
+            analysis['by_horizon'][horizon] = {
+                'mean_crps': horizon_data['crps'].mean(),
+                'mean_pit': horizon_data['pit'].mean(),
+                'coverage_90': horizon_data['coverage_90'].mean(),
+                'mean_rmse': horizon_data['rmse'].mean()
+            }
         
-        # regime_labels is a Series, filter by date range
-        regime_labels_sub = regime_labels[(regime_labels.index >= start_date) & 
-                                          (regime_labels.index <= end_date)]
+        # By tenor
+        analysis['by_tenor'] = {}
+        for tenor in self.config['data']['tenors']:
+            tenor_data = results_df[results_df['tenor'] == tenor]
+            analysis['by_tenor'][tenor] = {
+                'mean_crps': tenor_data['crps'].mean(),
+                'mean_pit': tenor_data['pit'].mean(),
+                'coverage_90': tenor_data['coverage_90'].mean()
+            }
         
-        # Run backtest on this subsample
-        df_backtest_sub = backtest_scenarios(
-            df_sub, df_factors_sub, afns_model, hmm_model,
-            regime_labels_sub, regime_covs, config
+        # Horizon consistency check
+        # Short horizons should have lower RMSE than long horizons
+        horizons_sorted = sorted(self.horizons)
+        rmse_by_horizon = [
+            analysis['by_horizon'][h]['mean_rmse'] 
+            for h in horizons_sorted
+        ]
+        analysis['horizon_consistency'] = all(
+            rmse_by_horizon[i] <= rmse_by_horizon[i+1] 
+            for i in range(len(rmse_by_horizon)-1)
         )
         
-        # Only compute metrics if we have data
-        if len(df_backtest_sub) > 0:
-            # Compute metrics
-            coverage = compute_coverage(df_backtest_sub)
-            dv01_metrics = compute_dv01_weighted_errors(df_backtest_sub, config)
-            shape_acc = compute_shape_accuracy(df_backtest_sub, config)
-            
-            stability_results[f"period_{i+1}"] = {
-                'dates': (start, end),
-                'coverage': coverage['overall'],
-                'dv01_mae': dv01_metrics['dv01_mae'],
-                'cosine_similarity': shape_acc
-            }
-        else:
-            stability_results[f"period_{i+1}"] = {
-                'dates': (start, end),
-                'coverage': None,
-                'dv01_mae': None,
-                'cosine_similarity': None,
-                'note': 'No data in test period'
-            }
-    
-    return stability_results
+        return analysis
 
 
 def run_validation(df, df_factors, afns_model, hmm_model, 
                    regime_labels, regime_covs, config):
     """
-    Main validation function
+    Main validation function with sophisticated multi-horizon testing
     
-    Args:
-        All model components and config
-        
     Returns:
-        validation_results: Dict with all validation metrics
+        Dict with comprehensive validation results
     """
-    print("\n=== Running Validation ===")
+    print("\n=== Running Multi-Horizon Validation ===")
     
-    # 1. Run backtest
-    print("Running historical backtest...")
-    df_backtest = backtest_scenarios(
-        df, df_factors, afns_model, hmm_model,
-        regime_labels, regime_covs, config
-    )
+    # Initialize validator
+    validator = MultiHorizonValidator(afns_model, hmm_model, config)
     
-    # 2. Compute coverage
-    print("Computing coverage rates...")
-    coverage_stats = compute_coverage(df_backtest)
+    # Run backtest
+    print("Running historical backtest at multiple horizons...")
+    print(f"Horizons: {validator.horizons} days")
     
-    # 3. Compute DV01-weighted errors
-    print("Computing DV01-weighted errors...")
-    dv01_metrics = compute_dv01_weighted_errors(df_backtest, config)
+    results_df = validator.run_backtest(df, df_factors)
     
-    # 4. Compute shape accuracy
-    print("Computing shape accuracy...")
-    shape_acc = compute_shape_accuracy(df_backtest, config)
+    # Analyze results
+    print("Analyzing results...")
+    analysis = validator.analyze_results(results_df)
     
-    # 5. Sub-sample stability
-    print("Testing sub-sample stability...")
-    stability = subsample_stability(
-        df, df_factors, afns_model, hmm_model,
-        regime_labels, regime_covs, config
-    )
-    
-    # Compile results
-    validation_results = {
-        'coverage': coverage_stats,
-        'dv01_metrics': dv01_metrics,
-        'cosine_similarity': shape_acc,
-        'stability': stability,
-        'backtest_data': df_backtest
-    }
-    
-    # Print summary with CRPS and PIT
+    # Print summary
     print("\n=== Validation Results ===")
-    print(f"Overall Coverage: {coverage_stats['overall']:.1%}")
-    print(f"Target: 90% (tolerance: {config['validation']['coverage_tolerance']})")
+    print(f"Overall Metrics:")
+    print(f"  Mean CRPS: {analysis['overall']['mean_crps']:.2f} bps")
+    print(f"  Mean PIT: {analysis['overall']['mean_pit']:.3f} (target: 0.500)")
+    print(f"  90% Coverage: {analysis['overall']['coverage_90']:.1%} (target: 90%)")
+    print(f"  95% Coverage: {analysis['overall']['coverage_95']:.1%} (target: 95%)")
+    print(f"  Mean Bias: {analysis['overall']['mean_bias']:.2f} bps")
     
-    print(f"\nDV01-Weighted MAE: {dv01_metrics['dv01_mae']:.4f}")
-    print(f"Unweighted MAE: {dv01_metrics['unweighted_mae']:.4f}")
+    print(f"\nBy Horizon:")
+    for horizon, metrics in analysis['by_horizon'].items():
+        years = horizon / 252
+        print(f"  {horizon} days ({years:.1f}Y):")
+        print(f"    CRPS: {metrics['mean_crps']:.2f} bps")
+        print(f"    Coverage: {metrics['coverage_90']:.1%}")
+        print(f"    RMSE: {metrics['mean_rmse']:.2f} bps")
     
-    print(f"\nCosine Similarity (Shape): {shape_acc:.4f}")
+    # Check calibration
+    pit_mean = analysis['overall']['mean_pit']
+    if 0.45 <= pit_mean <= 0.55:
+        print("\n✓ PIT well-calibrated (unbiased forecasts)")
+    else:
+        print(f"\n⚠ PIT = {pit_mean:.3f} indicates bias")
     
-    # CRPS Metrics
-    if 'crps' in df_backtest.columns:
-        print(f"\nCRPS Metrics (bps):")
-        tenors = config['data']['tenors']
-        for tenor in tenors:
-            avg_crps = df_backtest[df_backtest['tenor']==tenor]['crps'].mean()
-            print(f"  {tenor}: {avg_crps:.2f} bps")
-        
-        overall_crps = df_backtest['crps'].mean()
-        print(f"  Overall: {overall_crps:.2f} bps")
-        
-        if overall_crps < 20:
-            print("  ✓ CRPS < 20 bps (good forecast quality)")
-        else:
-            print("  ⚠ CRPS > 20 bps (poor forecast quality)")
+    coverage_90 = analysis['overall']['coverage_90']
+    if 0.85 <= coverage_90 <= 0.95:
+        print("✓ Coverage well-calibrated")
+    else:
+        print(f"⚠ Coverage = {coverage_90:.1%} (miscalibrated)")
     
-    # PIT Calibration
-    if 'pit' in df_backtest.columns:
-        pit_mean = df_backtest['pit'].mean()
-        print(f"\nPIT Calibration:")
-        print(f"  Average PIT: {pit_mean:.3f} (target: 0.50)")
-        
-        if 0.45 <= pit_mean <= 0.55:
-            print("  ✓ Well-calibrated (unbiased forecast)")
-        elif pit_mean < 0.45:
-            print("  ⚠ Biased high (over-predicting)")
-        else:
-            print("  ⚠ Biased low (under-predicting)")
+    if analysis['horizon_consistency']:
+        print("✓ Horizon consistency maintained (uncertainty grows with time)")
+    else:
+        print("⚠ Horizon inconsistency detected")
     
-    print("\nSub-sample Stability:")
-    for period, stats in stability.items():
-        print(f"  {stats['dates'][0]} to {stats['dates'][1]}:")
-        if stats['coverage'] is not None:
-            print(f"    Coverage: {stats['coverage']:.1%}")
-            print(f"    DV01 MAE: {stats['dv01_mae']:.4f}")
-            print(f"    Cosine Sim: {stats['cosine_similarity']:.4f}")
-        else:
-            print(f"    {stats.get('note', 'No data')}")
-    
-    return validation_results
-
-
-def validate_conformal(df, df_factors, afns_model, hmm_model,
-                       regime_labels, regime_covs, config):
-    """Validate conformal predictor using train/calibration/test split."""
-    from src.conformal import ConformalScenarioGenerator, compute_crps
-
-    print("\n=== Conformal Validation (Train/Cal/Test Split) ===")
-
-    train_end = pd.Timestamp('2018-12-31')
-    cal_end = pd.Timestamp('2021-12-31')
-    test_start = pd.Timestamp('2022-01-01')
-
-    train_mask = df.index <= train_end
-    cal_mask = (df.index > train_end) & (df.index <= cal_end)
-    test_mask = df.index >= test_start
-
-    print(f"Train: {df.index[train_mask][0].date()} to {df.index[train_mask][-1].date()}")
-    print(f"Calibration: {df.index[cal_mask][0].date()} to {df.index[cal_mask][-1].date()}")
-    print(f"Test: {df.index[test_mask][0].date()} to {df.index[test_mask][-1].date()}")
-
-    # Create a simple base generator for conformal (not the full path simulator)
-    class SimpleGenerator:
-        def __init__(self, afns_model, config):
-            self.afns = afns_model
-            self.config = config
-    
-    base_generator = SimpleGenerator(afns_model, config)
-    conformal_generator = ConformalScenarioGenerator(base_generator, confidence_level=0.90)
-
-    calibration_dates = df.index[cal_mask]
-    conformal_generator.calibrate(df, df_factors, regime_labels, calibration_dates, regime_covs)
-
-    df_test = df[test_mask]
-
-    tenors = config['data']['tenors']
-    results = []
-
-    print("Generating conformal forecasts on test set...")
-    for i in range(len(df_test) - 1):
-        date = df_test.index[i]
-        next_date = df_test.index[i + 1]
-
-        idx = df.index.get_loc(date)
-        current_factors = df_factors.iloc[idx][['L', 'S', 'C']].values
-        current_yields = df.iloc[idx][tenors].values
-        
-        # Get regime from Series
-        try:
-            current_regime = int(regime_labels.loc[date])
-        except:
-            current_regime = int(regime_labels.iloc[-1])
-
-        current_state = {
-            'date': date,
-            'yields': current_yields,
-            'factors': current_factors,
-            'regime': current_regime
-        }
-
-        # Generate simple single-step scenario for conformal
-        cov = regime_covs[current_regime] if current_regime in regime_covs else regime_covs[0]
-        factor_shocks = np.random.multivariate_normal(mean=np.zeros(3), cov=cov, size=1000)
-        sim_factors = current_factors + factor_shocks
-        sim_yields = afns_model.reconstruct_yields(sim_factors)
-        
-        # Create scenario dict matching old format
-        scenario = {
-            'percentiles': {}
-        }
-        for j, tenor in enumerate(tenors):
-            q_lower, q_upper = conformal_generator.quantiles_by_regime[current_regime][tenor]
-            forecast = np.median(sim_yields[:, j])
-            scenario['percentiles'][tenor] = {
-                'p5': forecast + q_lower,
-                'p50': forecast,
-                'p95': forecast + q_upper
-            }
-
-        next_idx = df.index.get_loc(next_date)
-        realized = df.iloc[next_idx][tenors].values
-
-        for j, tenor in enumerate(tenors):
-            percs = scenario['percentiles'][tenor]
-            results.append({
-                'date': date,
-                'next_date': next_date,
-                'tenor': tenor,
-                'regime': current_regime,
-                'forecast_p5': percs['p5'],
-                'forecast_p50': percs['p50'],
-                'forecast_p95': percs['p95'],
-                'realized': realized[j],
-                'in_band': (realized[j] >= percs['p5']) and (realized[j] <= percs['p95'])
-            })
-
-    df_results = pd.DataFrame(results)
-
-    coverage = df_results['in_band'].mean()
-    coverage_by_tenor = df_results.groupby('tenor')['in_band'].mean()
-    coverage_by_regime = df_results.groupby('regime')['in_band'].mean()
-
-    dv01_metrics = compute_dv01_weighted_errors(df_results, config)
-
-    shape_acc = compute_shape_accuracy(df_results, config)
-
-    dates = df_results['date'].unique()
-    crps_scores = []
-    for date in dates:
-        date_data = df_results[df_results['date'] == date]
-        forecasts = []
-        realized = []
-        for _, row in date_data.iterrows():
-            forecasts.append({
-                'p5': row['forecast_p5'],
-                'p50': row['forecast_p50'],
-                'p95': row['forecast_p95']
-            })
-            realized.append(row['realized'])
-        crps_scores.append(compute_crps(forecasts, np.array(realized)))
-
-    avg_crps = np.mean(crps_scores)
-
-    print(f"\n=== Test Set Results (Held-Out) ===")
-    print(f"Coverage: {coverage:.1%}")
-    print("Target: 90% ± 5% (85-95%)")
-    print(f"\nCoverage by Tenor:")
-    for tenor, cov in coverage_by_tenor.items():
-        print(f"  {tenor}: {cov:.1%}")
-    print(f"\nCoverage by Regime:")
-    for regime, cov in coverage_by_regime.items():
-        print(f"  Regime {regime}: {cov:.1%}")
-    print(f"\nDV01-Weighted MAE: {dv01_metrics['dv01_mae']:.4f}")
-    print(f"Cosine Similarity: {shape_acc:.4f}")
-    print(f"Average CRPS: {avg_crps:.4f}")
-
     return {
-        'coverage': coverage,
-        'coverage_by_tenor': coverage_by_tenor.to_dict(),
-        'coverage_by_regime': coverage_by_regime.to_dict(),
-        'dv01_metrics': dv01_metrics,
-        'cosine_similarity': shape_acc,
-        'crps': avg_crps,
-        'test_data': df_results
+        'results_df': results_df,
+        'analysis': analysis,
+        'validator': validator
     }

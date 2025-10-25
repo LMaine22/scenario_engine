@@ -12,26 +12,36 @@ from tqdm import tqdm
 class ScenarioGenerator:
     """Generate multi-step yield curve scenarios with regime transitions"""
     
-    def __init__(self, afns_model, hmm_model, spread_engine=None, n_paths=10000,
-                 horizon_days=126, n_jobs=-1, move_state='neutral', q_scaler=1.0):
+    def __init__(self, afns_model, hmm_model, spread_engine=None, 
+                 horizons=None, n_paths=10000, n_jobs=-1, 
+                 move_state='neutral', q_scaler=1.0):
         """
+        Enhanced for multi-year horizon support
+        
         Args:
-            afns_model: Fitted AFNS model (with VAR parameters)
-            hmm_model: Fitted StickyHMM model
-            spread_engine: Optional SpreadEngine for credit spreads
-            n_paths: Number of Monte Carlo paths to simulate
-            horizon_days: Forecast horizon in business days
-            n_jobs: Number of CPU cores (-1 = all minus 1)
-            move_state: MOVE volatility state ('low', 'neutral', 'high')
-            q_scaler: Volatility scaling factor
+            horizons: Dict of horizon_name -> days, e.g. {'6m': 126, '3y': 756}
         """
         self.afns = afns_model
         self.hmm = hmm_model
         self.spread_engine = spread_engine
         self.n_paths = n_paths
-        self.horizon_days = horizon_days
         self.move_state = move_state
         self.q_scaler = q_scaler
+        
+        # Multi-horizon support
+        if horizons is None:
+            self.horizons = {
+                '6m': 126,
+                '1y': 252,
+                '2y': 504,
+                '3y': 756,
+                '5y': 1260
+            }
+        else:
+            self.horizons = horizons
+        
+        # Default single horizon attribute used by generate_scenario
+        self.horizon_days = max(self.horizons.values()) if isinstance(self.horizons, dict) else 126
         
         # Set number of jobs
         if n_jobs == -1:
@@ -255,6 +265,34 @@ class ScenarioGenerator:
             }
         
         return all_scenarios
+
+    def generate_all_horizons(self, current_state, fed_shock_bp=0):
+        """
+        Generate scenarios for all configured horizons
+        
+        Returns:
+            Dict mapping horizon_name -> (paths_df, percentiles)
+        """
+        all_horizons = {}
+        
+        for horizon_name, horizon_days in self.horizons.items():
+            print(f"\nGenerating {horizon_name} ({horizon_days} days) scenarios...")
+            
+            # Update horizon for this run
+            self.horizon_days = horizon_days
+            
+            # Generate scenarios
+            paths_df, percentiles = self.generate_scenario(
+                current_state, fed_shock_bp
+            )
+            
+            all_horizons[horizon_name] = {
+                'paths': paths_df,
+                'percentiles': percentiles,
+                'horizon_days': horizon_days
+            }
+        
+        return all_horizons
 
 
 def format_scenario_output(all_scenarios):

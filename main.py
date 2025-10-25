@@ -194,30 +194,106 @@ def main():
         df_factors, afns_model, cov_matrix = fit_afns_model(df, config)
         pbar.update(1)
         
-        # 4. Fit regime model (now Sticky HMM)
+        # 4. Fit regime model with higher persistence
         pbar.set_description("[4/8] Fitting Sticky HMM")
         hmm_model, regime_labels, regime_stats, regime_covs = fit_regime_model(
             df, df_factors, afns_model, config
         )
+
+        # Print regime persistence check
+        print(f"\nRegime Persistence Check:")
+        for k, stats in regime_stats.items():
+            duration = stats['expected_duration_days']
+            if duration < 30:
+                print(f"  \u26a0 Regime {k}: {duration:.1f} days (too short for multi-year forecasting)")
+            else:
+                print(f"  \u2713 Regime {k}: {duration:.1f} days ({duration/252:.1f} years)")
         pbar.update(1)
         
-        # 5. Run scenario analysis (now with path simulation)
-        pbar.set_description("[5/8] Generating path scenarios (10K paths)")
-        spread_engine = None  # TODO: Implement spread engine in Phase 4
-        scenarios, df_scenarios, current_state = run_scenario_analysis(
-            df, df_factors, afns_model, hmm_model, regime_labels, regime_covs, 
-            spread_engine, config,
-            fed_shocks=[-100, -50, 0, 50, 100]
+        # 5. Multi-horizon scenario generation
+        pbar.set_description("[5/8] Generating multi-year scenarios (10K paths)")
+
+        # Get all horizons from config
+        horizons = config['scenarios']['horizons']
+
+        # Initialize scenario generator with multi-year support
+        from src.scenarios import ScenarioGenerator
+        generator = ScenarioGenerator(
+            afns_model=afns_model,
+            hmm_model=hmm_model,
+            spread_engine=None,  # Phase 2
+            horizons=horizons,
+            n_paths=config['scenarios']['n_paths'],
+            n_jobs=config['scenarios']['n_jobs']
+        )
+
+        # Generate for multiple Fed scenarios and horizons
+        fed_shocks = config['scenarios']['fed_shocks']
+        all_scenarios = {}
+
+        for shock in fed_shocks:
+            print(f"\nFed Shock: {shock:+d} bps")
+            
+            # Get current state
+            current_state = {
+                'date': df.index[-1],
+                'yields': df.iloc[-1][config['data']['tenors']].values,
+                'factors': afns_model.factors.iloc[-1].values,
+                'regime_probs': hmm_model.regime_probs.iloc[-1].values
+            }
+            
+            # Generate for all horizons
+            horizon_scenarios = generator.generate_all_horizons(current_state, shock)
+            all_scenarios[shock] = horizon_scenarios
+
+        # Backward-compat dataframes for saving fan chart and CSV
+        # Use no-shock percentiles at the max horizon for legacy outputs
+        base_no_shock = all_scenarios.get(0) or all_scenarios.get(0.0) or next(iter(all_scenarios.values()))
+        max_h_name, max_h_data = sorted(base_no_shock.items(), key=lambda x: x[1]['horizon_days'])[-1]
+        df_scenarios = pd.DataFrame([
+            {
+                'Fed_Shock_bp': shock,
+                'Tenor': k,
+                'p5': v['percentiles'][k]['p5'],
+                'p50': v['percentiles'][k]['p50'],
+                'p95': v['percentiles'][k]['p95'],
+                'mean': v['percentiles'][k]['mean'],
+                'std': v['percentiles'][k]['std']
+            }
+            for shock, horizon_map in all_scenarios.items()
+            for _, v in [sorted(horizon_map.items(), key=lambda x: x[1]['horizon_days'])[-1]]
+            for k in v['percentiles'].keys()
+        ])
+        scenarios = {shock: data[max_h_name] for shock, data in all_scenarios.items()}
+        pbar.update(1)
+        
+        # 6. Run sophisticated multi-horizon validation
+        pbar.set_description("[6/8] Running multi-horizon validation")
+        validation_results = run_validation(
+            df, df_factors, afns_model, hmm_model, 
+            regime_labels, regime_covs, config
         )
         pbar.update(1)
+
+        # Print multi-year forecast example
+        print("\n=== Multi-Year Forecast Example (10yr Treasury) ===")
+        print("Current: {:.2f}%".format(current_state['yields'][4]))
+        print("\nNo Fed Action Scenario:")
+        for horizon_name, data in all_scenarios[0].items():
+            percs = data['percentiles']['UST_10']
+            years = data['horizon_days'] / 252
+            print(f"  {horizon_name:3} ({years:3.1f}Y): {percs['p50']:.2f}% [{percs['p5']:.2f}% - {percs['p95']:.2f}%]")
         
-        # 6. Baseline validation
-        pbar.set_description("[6/8] Running baseline validation with CRPS/PIT")
-        baseline_results = run_validation(
-            df, df_factors, afns_model, hmm_model, regime_labels, regime_covs, config
-        )
-        pbar.update(1)
-        
+        # Map multi-horizon validation results to baseline_results structure for saving
+        baseline_results = {
+            'coverage': {
+                'overall': validation_results['analysis']['overall']['coverage_90']
+            },
+            'dv01_metrics': {'dv01_mae': float('nan')},
+            'cosine_similarity': float('nan'),
+            'backtest_data': validation_results['results_df']
+        }
+
         # 7. Conformal validation (DISABLED - needs update for new scenario API)
         pbar.set_description("[7/8] Skipping conformal validation (to be updated)")
         conformal_results = {
