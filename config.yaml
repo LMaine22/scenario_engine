@@ -23,13 +23,39 @@ regime:
   vol_window: 60              
   inflation_halflife: 21      
   n_states_range: [2, 3, 4]
-  sticky_alpha: 30.0        # INCREASED from 10 -> 100 for multi-month persistence
+  sticky_alpha: 30.0        # Increased for multi-month persistence
   random_state: 42            
   
   # Regime-dependent volatility scaling
   volatility_scaling:
     use_scaled_Q: true       # Scale Q matrix by regime
     scale_method: "trace_ratio"  # How to compute scaling factor
+
+# SPREAD ENGINE CONFIGURATION (Phase 2)
+spreads:
+  enabled: true  # Set to false to disable spread forecasting
+  
+  # Sectors to model
+  sectors: ["Muni", "Agency", "Corp"]
+  
+  # Benchmark maturity for spread modeling (5Y is most liquid)
+  benchmark_maturity: 5
+  
+  # Factor loading estimation
+  factor_loadings:
+    method: "ols"  # OLS regression of spreads on Treasury factors
+    min_r2: 0.1    # Minimum R² required (0.1 = 10% explained by Treasuries)
+  
+  # Residual VAR parameters
+  residual_var:
+    min_regime_observations: 30  # Minimum obs per regime for separate estimation
+    use_pooled_fallback: true    # Use pooled estimates if regime has too few obs
+    check_stability: true        # Verify VAR stability (max eigenvalue < 1)
+  
+  # Economic validation
+  validation:
+    check_factor_intuition: true  # Validate β loadings make economic sense
+    warn_on_anomalies: true       # Warn if loadings seem unusual
 
 # SCENARIO GENERATION - MULTI-YEAR HORIZONS
 scenarios:
@@ -65,7 +91,7 @@ validation:
   n_paths_validation: 500  # Increased from 200 to 500
   
   # Parallel processing for faster backtesting
-  n_jobs: -1  # Use all available cores minus 1 (-1), or specify number for better statistics
+  n_jobs: -1  # Use all available cores minus 1 (-1), or specify number
   
   subsample_splits:
     - ["2010-01-01", "2015-12-31"]  # Pre-liftoff
