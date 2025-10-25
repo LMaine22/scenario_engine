@@ -223,6 +223,21 @@ class ScenarioGenerator:
         # Get yield columns
         yield_cols = [f'UST_{int(mat)}' for mat in self.afns.maturities]
         
+        # CRISIS ADAPTATION: Scale uncertainty based on current MOVE
+        vol_multiplier = 1.0
+        if 'move' in current_state:
+            current_move = current_state['move']
+            move_baseline = 80.0  # Normal MOVE level
+            
+            if current_move > move_baseline * 1.5:  # Crisis threshold (>120)
+                vol_multiplier = min(current_move / move_baseline, 3.0)  # Cap at 3x
+                print(f"Crisis mode: MOVE={current_move:.1f}, scaling intervals by {vol_multiplier:.1f}x")
+                
+                # Scale the dispersion of yields around their mean
+                for col in yield_cols:
+                    col_mean = final_df[col].mean()
+                    final_df[col] = col_mean + (final_df[col] - col_mean) * vol_multiplier
+        
         percentiles_dict = {}
         for col in yield_cols:
             percentiles_dict[col] = {

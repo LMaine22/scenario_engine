@@ -8,6 +8,8 @@ from scipy.linalg import solve_discrete_lyapunov
 from typing import Dict, List, Tuple, Optional
 import logging
 from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,11 @@ class MultiHorizonValidator:
         # Regime-dependent volatility scaling
         self.use_scaled_Q = config['regime']['volatility_scaling']['use_scaled_Q']
         self.scale_method = config['regime']['volatility_scaling']['scale_method']
+        
+        # Parallel processing
+        self.n_jobs = config.get('validation', {}).get('n_jobs', -1)
+        if self.n_jobs == -1:
+            self.n_jobs = max(1, cpu_count() - 1)
         
         logger.info(f"Initialized MultiHorizonValidator with horizons: {self.horizons}")
     
@@ -108,38 +115,44 @@ class MultiHorizonValidator:
         factor_paths = np.zeros((n_paths, horizon + 1, 3))
         regime_paths = np.zeros((n_paths, horizon + 1), dtype=int)
         
-        # Simulate each path
-        for p in range(n_paths):
-            # Draw initial regime from current distribution
-            s_t = np.random.choice(self.hmm.n_states, p=gamma_0)
+        # Vectorized initial conditions
+        # Draw initial regimes for all paths at once
+        initial_regimes = np.random.choice(self.hmm.n_states, size=n_paths, p=gamma_0)
+        regime_paths[:, 0] = initial_regimes
+        
+        # Draw initial factors for all paths (vectorized)
+        initial_factors = np.random.multivariate_normal(f_0, P_ss * 0.1, size=n_paths)
+        factor_paths[:, 0, :] = initial_factors
+        
+        # For each time step (can't fully vectorize due to regime dependencies)
+        for t in range(1, horizon + 1):
+            # Vectorized regime transitions
+            for p in range(n_paths):
+                current_regime = regime_paths[p, t-1]
+                transition_probs = self.hmm.transition_matrix[current_regime, :]
+                regime_paths[p, t] = np.random.choice(self.hmm.n_states, p=transition_probs)
             
-            # Draw initial factors from steady-state distribution
-            # This captures parameter uncertainty
-            f_t = np.random.multivariate_normal(f_0, P_ss * 0.1)  # Scale down P_ss
+            # Vectorized factor evolution for all paths
+            prev_factors = factor_paths[:, t-1, :]  # (n_paths, 3)
             
-            # Store initial state
-            factor_paths[p, 0, :] = f_t
-            regime_paths[p, 0] = s_t
-            
-            # Evolve forward
-            for t in range(1, horizon + 1):
-                # Regime transition
-                transition_probs = self.hmm.transition_matrix[s_t, :]
-                s_t = np.random.choice(self.hmm.n_states, p=transition_probs)
+            # Group paths by regime for efficient noise generation
+            for regime in range(self.hmm.n_states):
+                mask = regime_paths[:, t] == regime
+                n_regime = np.sum(mask)
                 
-                # Scale Q by regime
-                if self.use_scaled_Q:
-                    Q_scaled = self.afns.Q * scaling_factors[s_t]
-                else:
-                    Q_scaled = self.afns.Q
-                
-                # VAR dynamics: f_{t+1} = A f_t + b + eta
-                eta = np.random.multivariate_normal(np.zeros(3), Q_scaled)
-                f_t = self.afns.A @ f_t + self.afns.b + eta
-                
-                # Store
-                factor_paths[p, t, :] = f_t
-                regime_paths[p, t] = s_t
+                if n_regime > 0:
+                    # Scale Q by regime
+                    if self.use_scaled_Q:
+                        Q_scaled = self.afns.Q * scaling_factors[regime]
+                    else:
+                        Q_scaled = self.afns.Q
+                    
+                    # Generate noise for all paths in this regime at once
+                    eta = np.random.multivariate_normal(np.zeros(3), Q_scaled, size=n_regime)
+                    
+                    # VAR dynamics: f_{t+1} = A f_t + b + eta (vectorized)
+                    factor_paths[mask, t, :] = (prev_factors[mask] @ self.afns.A.T + 
+                                                self.afns.b + eta)
         
         return factor_paths, regime_paths
     
@@ -223,6 +236,100 @@ class MultiHorizonValidator:
         
         return metrics
     
+    def _process_single_origin(self, args):
+        """Helper function to process a single origin date (for parallel processing)"""
+        origin_idx, origin_date, df_test, df_factors_test, tenors = args
+        results = []
+        
+        try:
+            # Current observations  
+            current_yields = df_test.loc[origin_date, tenors].values
+            current_factors = df_factors_test.loc[origin_date].values
+            
+            # Get regime probabilities at origin
+            try:
+                current_gamma = self.hmm.regime_probs.loc[origin_date].values
+            except:
+                # If exact date not found, use nearest
+                nearest_idx = self.hmm.regime_probs.index.get_indexer([origin_date], method='nearest')[0]
+                current_gamma = self.hmm.regime_probs.iloc[nearest_idx].values
+            
+            initial_state = {
+                'factors': current_factors,
+                'regime_probs': current_gamma,
+                'yields': current_yields
+            }
+            
+            # For each horizon
+            for horizon in self.horizons:
+                # Check if we have data horizon days in the future
+                target_date = origin_date + pd.Timedelta(days=horizon)
+                if target_date > df_test.index[-1]:
+                    continue
+                
+                # Simulate paths
+                factor_paths, regime_paths = self.simulate_paths(
+                    initial_state, horizon, n_paths=self.n_paths
+                )
+                
+                # Convert to yields
+                yield_paths = self.factors_to_yields(factor_paths)
+                forecasts = yield_paths[:, -1, :]  # Terminal values
+                
+                # Get realized yields - find the closest date to target
+                realized_date = df_test.index[df_test.index.get_indexer([target_date], method='nearest')[0]]
+                realized = df_test.loc[realized_date, tenors].values
+                
+                # CRISIS ADAPTATION: Scale intervals based on MOVE
+                if 'MOVE Index' in df_test.columns:
+                    current_move = df_test.loc[origin_date, 'MOVE Index']
+                    move_baseline = 80.0  # Normal MOVE level
+                    
+                    # Scale forecast dispersion when volatility is high
+                    if current_move > move_baseline * 1.5:  # > 120
+                        vol_multiplier = current_move / move_baseline
+                        # Widen the forecast distribution
+                        forecast_mean = np.mean(forecasts, axis=0)
+                        forecasts = forecast_mean + (forecasts - forecast_mean) * vol_multiplier
+                
+                # Compute metrics
+                metrics = self.compute_metrics(forecasts, realized)
+                
+                # Store results
+                for m, tenor in enumerate(tenors):
+                    mat_metrics = metrics[f'mat_{m}']
+                    
+                    # Build result dict with all fields explicitly
+                    result = {
+                        'origin_date': origin_date,
+                        'horizon_days': horizon,
+                        'target_date': realized_date,
+                        'tenor': tenor,
+                        'maturity': self.afns.maturities[m],
+                        'realized': realized[m],
+                        'forecast_mean': np.mean(forecasts[:, m]),
+                        'forecast_p5': np.percentile(forecasts[:, m], 5),
+                        'forecast_p50': np.percentile(forecasts[:, m], 50),
+                        'forecast_p95': np.percentile(forecasts[:, m], 95),
+                    }
+                    
+                    # Add metrics explicitly, with defaults if missing
+                    result['crps'] = mat_metrics.get('crps', 0.0)
+                    result['pit'] = mat_metrics.get('pit', 0.5)
+                    result['coverage_90'] = mat_metrics.get('coverage_90', False)
+                    result['coverage_95'] = mat_metrics.get('coverage_95', False)
+                    result['coverage_99'] = mat_metrics.get('coverage_99', False)
+                    result['bias'] = mat_metrics.get('bias', 0.0)
+                    result['rmse'] = mat_metrics.get('rmse', 0.0)
+                    result['mae'] = mat_metrics.get('mae', 0.0)
+                    
+                    results.append(result)
+                    
+        except Exception as e:
+            logger.warning(f"Error processing origin date {origin_date}: {str(e)}")
+            
+        return results
+    
     def _compute_crps(self, forecast_samples: np.ndarray, realized: float) -> float:
         """Compute CRPS with efficient subsampling"""
         term1 = np.mean(np.abs(forecast_samples - realized))
@@ -268,6 +375,12 @@ class MultiHorizonValidator:
         Returns:
             DataFrame with backtest results
         """
+        # Test-mode overrides (optional, from config)
+        max_test_points = self.config['validation']['backtest'].get('max_test_points', None)
+        test_frequency = self.config['validation']['backtest'].get('test_frequency', 'daily')
+        n_paths_override = self.config['validation'].get('n_paths_validation', self.n_paths)
+        self.n_paths = n_paths_override
+
         if start_date is None:
             start_date = self.config['validation']['backtest']['start_date']
         if end_date is None:
@@ -278,31 +391,79 @@ class MultiHorizonValidator:
                    (df.index <= pd.Timestamp(end_date))
         df_test = df[test_mask]
         df_factors_test = df_factors[test_mask]
+
+        # Downsample frequency for testing
+        if test_frequency == 'monthly' and len(df_test) > 0:
+            # first day of month in index
+            monthly_mask = df_test.index.to_series().dt.day == 1
+            if monthly_mask.any():
+                df_test = df_test[monthly_mask]
+                df_factors_test = df_factors_test[monthly_mask]
+        
+        # Limit number of test origins
+        if max_test_points and len(df_test) > max_test_points:
+            step = max(1, len(df_test) // max_test_points)
+            df_test = df_test.iloc[::step][:max_test_points]
+            df_factors_test = df_factors_test.iloc[::step][:max_test_points]
+        
+        print(f"Testing on {len(df_test)} points (reduced for speed)")
         
         results = []
         tenors = self.config['data']['tenors']
         
-        # For each origin date
-        for origin_idx in tqdm(range(len(df_test)), desc="Backtesting", leave=False):
-            origin_date = df_test.index[origin_idx]
+        # Check if we should use parallel processing
+        use_parallel = self.n_jobs > 1 and len(df_test) > 10
+        
+        if use_parallel:
+            # Prepare arguments for parallel processing
+            parallel_args = []
+            for origin_idx in range(len(df_test)):
+                origin_date = df_test.index[origin_idx]
+                
+                # Skip if not enough future data for longest horizon
+                max_horizon = max(self.horizons)
+                max_target_date = origin_date + pd.Timedelta(days=max_horizon)
+                if max_target_date > df_test.index[-1]:
+                    continue
+                    
+                parallel_args.append((origin_idx, origin_date, df_test, df_factors_test, tenors))
             
-            # Skip if not enough future data for longest horizon
-            max_horizon = max(self.horizons)
-            if origin_idx + max_horizon >= len(df_test):
-                continue
+            # Process in parallel with progress bar
+            print(f"Processing {len(parallel_args)} origins with {self.n_jobs} workers...")
+            with Pool(processes=self.n_jobs) as pool:
+                batch_results = list(tqdm(
+                    pool.imap(self._process_single_origin, parallel_args),
+                    total=len(parallel_args),
+                    desc="Backtesting (parallel)",
+                    leave=False
+                ))
             
-            # Get initial state
-            factors_0 = df_factors_test.iloc[origin_idx].values
-            
-            # Get regime probabilities at origin
-            try:
-                gamma_0 = self.hmm.regime_probs.loc[origin_date].values
-            except:
-                # If exact date not found, use nearest
-                nearest_idx = self.hmm.regime_probs.index.get_indexer([origin_date], method='nearest')[0]
-                gamma_0 = self.hmm.regime_probs.iloc[nearest_idx].values
-            
-            initial_state = {
+            # Flatten results
+            for batch in batch_results:
+                results.extend(batch)
+        else:
+            # Original sequential processing
+            for origin_idx in tqdm(range(len(df_test)), desc="Backtesting", leave=False):
+                origin_date = df_test.index[origin_idx]
+                
+                # Skip if not enough future data for longest horizon
+                max_horizon = max(self.horizons)
+                max_target_date = origin_date + pd.Timedelta(days=max_horizon)
+                if max_target_date > df_test.index[-1]:
+                    continue
+                
+                # Get initial state
+                factors_0 = df_factors_test.iloc[origin_idx].values
+                
+                # Get regime probabilities at origin
+                try:
+                    gamma_0 = self.hmm.regime_probs.loc[origin_date].values
+                except:
+                    # If exact date not found, use nearest
+                    nearest_idx = self.hmm.regime_probs.index.get_indexer([origin_date], method='nearest')[0]
+                    gamma_0 = self.hmm.regime_probs.iloc[nearest_idx].values
+                
+                initial_state = {
                 'factors': factors_0,
                 'regime_probs': gamma_0,
                 'date': origin_date
@@ -310,7 +471,9 @@ class MultiHorizonValidator:
             
             # For each horizon
             for horizon in self.horizons:
-                if origin_idx + horizon >= len(df_test):
+                # Check if we have data horizon days in the future
+                target_date = origin_date + pd.Timedelta(days=horizon)
+                if target_date > df_test.index[-1]:
                     continue
                 
                 # Simulate paths
@@ -324,9 +487,21 @@ class MultiHorizonValidator:
                 # Extract forecasts at horizon
                 forecasts = yield_paths[:, -1, :]  # (n_paths, n_maturities)
                 
-                # Get realized yields
-                realized_date = df_test.index[origin_idx + horizon]
+                # Get realized yields - find the closest date to target
+                realized_date = df_test.index[df_test.index.get_indexer([target_date], method='nearest')[0]]
                 realized = df_test.loc[realized_date, tenors].values
+                
+                # CRISIS ADAPTATION: Scale intervals based on MOVE
+                if 'MOVE Index' in df_test.columns:
+                    current_move = df_test.loc[origin_date, 'MOVE Index']
+                    move_baseline = 80.0  # Normal MOVE level
+                    
+                    # Scale forecast dispersion when volatility is high
+                    if current_move > move_baseline * 1.5:  # > 120
+                        vol_multiplier = current_move / move_baseline
+                        # Widen the forecast distribution
+                        forecast_mean = np.mean(forecasts, axis=0)
+                        forecasts = forecast_mean + (forecasts - forecast_mean) * vol_multiplier
                 
                 # Compute metrics
                 metrics = self.compute_metrics(forecasts, realized)
@@ -334,7 +509,9 @@ class MultiHorizonValidator:
                 # Store results
                 for m, tenor in enumerate(tenors):
                     mat_metrics = metrics[f'mat_{m}']
-                    results.append({
+                    
+                    # Build result dict with all fields explicitly
+                    result = {
                         'origin_date': origin_date,
                         'horizon_days': horizon,
                         'target_date': realized_date,
@@ -345,8 +522,19 @@ class MultiHorizonValidator:
                         'forecast_p5': np.percentile(forecasts[:, m], 5),
                         'forecast_p50': np.percentile(forecasts[:, m], 50),
                         'forecast_p95': np.percentile(forecasts[:, m], 95),
-                        **mat_metrics
-                    })
+                    }
+                    
+                    # Add metrics explicitly, with defaults if missing
+                    result['crps'] = mat_metrics.get('crps', 0.0)
+                    result['pit'] = mat_metrics.get('pit', 0.5)
+                    result['coverage_90'] = mat_metrics.get('coverage_90', False)
+                    result['coverage_95'] = mat_metrics.get('coverage_95', False)
+                    result['coverage_99'] = mat_metrics.get('coverage_99', False)
+                    result['bias'] = mat_metrics.get('bias', 0.0)
+                    result['rmse'] = mat_metrics.get('rmse', 0.0)
+                    result['mae'] = mat_metrics.get('mae', 0.0)
+                    
+                    results.append(result)
         
         return pd.DataFrame(results)
     

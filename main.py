@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 from tqdm import tqdm
+from datetime import datetime
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
@@ -28,7 +29,7 @@ from src.utils import load_config, prepare_data
 from src.afns import fit_afns_model
 from src.regime import fit_regime_model
 from src.scenarios import run_scenario_analysis
-from src.validation import run_validation, validate_conformal
+from src.validation import run_validation
 
 
 def plot_scenario_fan(scenarios, current_state, config, save_path=None):
@@ -127,45 +128,40 @@ def plot_regime_analysis(df, regime_labels, config, save_path=None):
     return fig
 
 
-def save_conformal_results(baseline_results, conformal_results, scenarios, df_scenarios, config):
-    """Save validation results comparing baseline and conformal approaches."""
+def save_results(validation_results, scenarios, config):
+    """Save validation and scenario results"""
     output_path = Path(config['output']['results_path'])
     output_path.mkdir(parents=True, exist_ok=True)
-
+    
+    # Save validation results
+    validation_results['results_df'].to_csv(
+        output_path / 'validation_results.csv', 
+        index=False
+    )
+    
+    # Save analysis summary
     with open(output_path / 'validation_summary.txt', 'w') as f:
-        f.write("=== Phase 1A Validation Results (Conformal) ===\n\n")
-
-        f.write("BASELINE (Manual Inflation):\n")
-        f.write(f"  Overall Coverage: {baseline_results['coverage']['overall']:.1%}\n")
-        f.write(f"  DV01-Weighted MAE: {baseline_results['dv01_metrics']['dv01_mae']:.4f}\n")
-        f.write(f"  Cosine Similarity: {baseline_results['cosine_similarity']:.4f}\n\n")
-
-        f.write("CONFORMAL (Test Set Only, 2022-2025):\n")
-        f.write(f"  Coverage: {conformal_results['coverage']:.1%}\n")
-        f.write("  Target: 90% ± 5% (85-95%)\n")
-        f.write(f"  DV01-Weighted MAE: {conformal_results['dv01_metrics']['dv01_mae']:.4f}\n")
-        f.write(f"  Cosine Similarity: {conformal_results['cosine_similarity']:.4f}\n")
-        f.write(f"  Average CRPS: {conformal_results['crps']:.4f}\n\n")
-
-        f.write("Coverage by Regime (Conformal):\n")
-        for regime, cov in conformal_results['coverage_by_regime'].items():
-            f.write(f"  Regime {regime}: {cov:.1%}\n")
-
-        f.write("\n" + "=" * 60 + "\n")
-        f.write("METHODOLOGY:\n")
-        f.write("- Split conformal prediction with proper time-series handling\n")
-        f.write("- Train: 2010-2018, Calibration: 2019-2021, Test: 2022-2025\n")
-        f.write("- Mondrian stratification by volatility regime\n")
-        f.write("- NO manual inflation factors - coverage achieved via residual quantiles\n")
-        f.write("- Guarantees marginal coverage without distributional assumptions\n")
-
-    conformal_results['test_data'].to_csv(output_path / 'conformal_test_results.csv', index=False)
-    baseline_results['backtest_data'].to_csv(output_path / 'baseline_backtest_results.csv', index=False)
-
+        f.write("=== Phase 1 Validation Results ===\n\n")
+        analysis = validation_results['analysis']
+        
+        f.write("Overall Metrics:\n")
+        f.write(f"  Mean CRPS: {analysis['overall']['mean_crps']:.2f} bps\n")
+        f.write(f"  Mean PIT: {analysis['overall']['mean_pit']:.3f}\n")
+        f.write(f"  90% Coverage: {analysis['overall']['coverage_90']:.1%}\n")
+        f.write(f"  95% Coverage: {analysis['overall']['coverage_95']:.1%}\n")
+        
+        f.write("\nBy Horizon:\n")
+        for horizon, metrics in analysis['by_horizon'].items():
+            years = horizon / 252
+            f.write(f"  {horizon} days ({years:.1f}Y):\n")
+            f.write(f"    CRPS: {metrics['mean_crps']:.2f} bps\n")
+            f.write(f"    Coverage: {metrics['coverage_90']:.1%}\n")
+    
+    # Save scenarios
     scenarios_path = Path(config['output']['scenarios_path'])
     scenarios_path.mkdir(parents=True, exist_ok=True)
-    df_scenarios.to_csv(scenarios_path / 'latest_scenarios.csv', index=False)
-
+    scenarios.to_csv(scenarios_path / 'latest_scenarios.csv', index=False)
+    
     print(f"\nResults saved to {output_path}")
 
 
@@ -176,12 +172,29 @@ def main():
     print("PHASE 1A: Treasury Scenario Engine - MVP (Conformal)")
     print("=" * 60)
     
+    # Create timestamped run directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = Path("runs") / timestamp
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n📁 Run directory: {run_dir}")
+    
     # Progress bar for overall pipeline
     with tqdm(total=8, desc="Overall Progress", position=0, leave=True) as pbar:
         
         # 1. Load configuration
         pbar.set_description("[1/8] Loading configuration")
-        config = load_config()
+        config = load_config("config.yaml")
+        
+        # Override output paths to use run directory
+        config['output']['figures_path'] = str(run_dir / "figures")
+        config['output']['results_path'] = str(run_dir / "results")
+        config['output']['scenarios_path'] = str(run_dir / "scenarios")
+        
+        # Create subdirectories
+        Path(config['output']['figures_path']).mkdir(parents=True, exist_ok=True)
+        Path(config['output']['results_path']).mkdir(parents=True, exist_ok=True)
+        Path(config['output']['scenarios_path']).mkdir(parents=True, exist_ok=True)
+        
         pbar.update(1)
         
         # 2. Prepare data
@@ -239,7 +252,8 @@ def main():
                 'date': df.index[-1],
                 'yields': df.iloc[-1][config['data']['tenors']].values,
                 'factors': afns_model.factors.iloc[-1].values,
-                'regime_probs': hmm_model.regime_probs.iloc[-1].values
+                'regime_probs': hmm_model.regime_probs.iloc[-1].values,
+                'move': df.iloc[-1]['MOVE Index'] if 'MOVE Index' in df.columns else 80.0
             }
             
             # Generate for all horizons
@@ -284,28 +298,8 @@ def main():
             years = data['horizon_days'] / 252
             print(f"  {horizon_name:3} ({years:3.1f}Y): {percs['p50']:.2f}% [{percs['p5']:.2f}% - {percs['p95']:.2f}%]")
         
-        # Map multi-horizon validation results to baseline_results structure for saving
-        baseline_results = {
-            'coverage': {
-                'overall': validation_results['analysis']['overall']['coverage_90']
-            },
-            'dv01_metrics': {'dv01_mae': float('nan')},
-            'cosine_similarity': float('nan'),
-            'backtest_data': validation_results['results_df']
-        }
-
-        # 7. Conformal validation (DISABLED - needs update for new scenario API)
-        pbar.set_description("[7/8] Skipping conformal validation (to be updated)")
-        conformal_results = {
-            'coverage': 0.0,
-            'coverage_by_tenor': {},
-            'coverage_by_regime': {},
-            'dv01_metrics': {'dv01_mae': 0.0},
-            'cosine_similarity': 0.0,
-            'crps': 0.0,
-            'test_data': pd.DataFrame()
-        }
-        print("\nConformal validation skipped (needs API update for path simulation)")
+        # 7. Conformal validation - SKIPPED (to be updated later)
+        pbar.set_description("[7/8] Skipping conformal validation")
         pbar.update(1)
 
         # 8. Generate outputs
@@ -324,16 +318,17 @@ def main():
                             save_path=figures_path / 'regime_analysis.png')
         
         # Save results
-        save_conformal_results(baseline_results, conformal_results, scenarios, df_scenarios, config)
+        save_results(validation_results, df_scenarios, config)
         pbar.update(1)
     
     print("\n" + "=" * 60)
     print("Phase 1A Complete (Conformal)!")
     print("=" * 60)
+    print(f"\n📁 Run directory: {run_dir}")
     print(f"\nOutputs saved to:")
-    print(f"  - {config['output']['figures_path']}")
-    print(f"  - {config['output']['results_path']}")
-    print(f"  - {config['output']['scenarios_path']}")
+    print(f"  - figures/  (scenario fan, regime analysis)")
+    print(f"  - results/  (validation results, backtest CSV)")
+    print(f"  - scenarios/  (latest scenarios CSV)")
 
 
 if __name__ == "__main__":

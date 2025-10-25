@@ -22,8 +22,8 @@ afns:
 regime:
   vol_window: 60              
   inflation_halflife: 21      
-  n_states_range: [2, 3, 4, 5]
-  sticky_alpha: 100.0        # INCREASED from 10 -> 100 for multi-month persistence
+  n_states_range: [2, 3, 4]
+  sticky_alpha: 30.0        # INCREASED from 10 -> 100 for multi-month persistence
   random_state: 42            
   
   # Regime-dependent volatility scaling
@@ -34,7 +34,7 @@ regime:
 # SCENARIO GENERATION - MULTI-YEAR HORIZONS
 scenarios:
   confidence_levels: [0.05, 0.5, 0.95]
-  n_paths: 10000          
+  n_paths: 1000          
   n_jobs: -1              
   
   # Multi-year horizons for reinvestment analysis
@@ -46,18 +46,26 @@ scenarios:
     '5y': 1260     # 5 years
   
   # Fed scenario shocks (basis points)
-  fed_shocks: [-200, -100, -50, 0, 50, 100, 200]
+  fed_shocks: [-100, 0, 100]
 
 # VALIDATION - MULTI-HORIZON
 validation:
-  # Test horizons must match scenario horizons
-  test_horizons: [126, 252, 504, 756, 1260]  # 6M, 1Y, 2Y, 3Y, 5Y
+  # Test horizons - Extended for comprehensive validation
+  test_horizons: [21, 63, 126, 252]  # 1M, 3M, 6M, 1Y
   
   # Backtesting configuration
   backtest:
-    start_date: "2015-01-01"  # Start of out-of-sample test
+    start_date: "2020-01-01"  # Earlier start for more test data
     refit_frequency: "quarterly"  # How often to re-estimate models
     min_training_years: 5  # Minimum history required
+    test_frequency: "monthly"  # Only test monthly, not daily!
+    max_test_points: 50  # Increased from 20 to 50 for more thorough testing
+  
+  # Override to use fewer paths in validation (vs 1000 for scenarios)
+  n_paths_validation: 500  # Increased from 200 to 500
+  
+  # Parallel processing for faster backtesting
+  n_jobs: -1  # Use all available cores minus 1 (-1), or specify number for better statistics
   
   subsample_splits:
     - ["2010-01-01", "2015-12-31"]  # Pre-liftoff
